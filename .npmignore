@@ -1,0 +1,53 @@
+# Dependencies
+node_modules/
+bun.lock
+package-lock.json
+
+# Source files
+*.ts
+!dist/*.d.ts
+
+# Development files
+.env
+.env.local
+.env.example
+.claude/
+tsconfig.json
+.gitignore
+
+# Logs
+*.log
+avatar_*.log
+
+# Generated avatar cache (users will generate their own)
+avatar_*.png
+!avatar.png
+
+# Development scripts
+.prettierrc
+.eslintrc
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Git
+.git/
+.github/
+
+# Testing
+coverage/
+.nyc_output/
+*.test.js
+*.spec.js
+
+# Documentation (except README)
+docs/
+CHANGELOG.md
+!README.md

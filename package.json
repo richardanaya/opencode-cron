@@ -1,0 +1,53 @@
+{
+  "name": "opencode-cron",
+  "version": "0.0.0",
+  "description": "A cron job scheduler for OpenCode sessions that triggers messages at scheduled intervals",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "bun build ./index.ts --outdir ./dist --target bun && bun run build:types",
+    "build:types": "tsc --emitDeclarationOnly",
+    "start": "bun run build",
+    "prepublishOnly": "bun run build"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.2",
+    "@types/node": "^25.0.10",
+    "electron": "^28.0.0",
+    "typescript": "^5.9.3"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "^1.1.25"
+  },
+  "dependencies": {
+    "croner": "^9.0.0",
+    "dotenv": "^17.2.3"
+  },
+  "keywords": [
+    "opencode",
+    "plugin",
+    "mailbox",
+    "messaging"
+  ],
+  "author": "OpenCode Community",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/richardanaya/opencode-cron.git"
+  },
+  "homepage": "https://github.com/richardanaya/opencode-cron#readme",
+  "bugs": {
+    "url": "https://github.com/richardanaya/opencode-cron/issues"
+  }
+}
