@@ -13330,7 +13330,6 @@ async function executeCronJob(client, sessionId, job) {
     await updateLastRun(client, job.name, executedAt);
     await addHistoryEntry(client, job.name, executedAt, true);
     await injectCronMessage(client, sessionId, job);
-    console.log(`[Cron] Executed job "${job.name}" at ${new Date(executedAt).toISOString()}`);
   } catch (error45) {
     const errorMessage = error45 instanceof Error ? error45.message : String(error45);
     await addHistoryEntry(client, job.name, executedAt, false, errorMessage);

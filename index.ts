@@ -372,7 +372,6 @@ async function executeCronJob(
     // Inject the message into the session
     await injectCronMessage(client, sessionId, job);
     
-    console.log(`[Cron] Executed job "${job.name}" at ${new Date(executedAt).toISOString()}`);
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     await addHistoryEntry(client, job.name, executedAt, false, errorMessage);
