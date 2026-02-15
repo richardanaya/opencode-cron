@@ -13137,7 +13137,7 @@ var R = class {
 // index.ts
 var dbFile = null;
 var db = null;
-var activeWatch = null;
+var activeWatches = new Map;
 async function getDbFile(client) {
   if (!dbFile) {
     const result = await client.path.get();
@@ -13153,7 +13153,8 @@ async function getDatabase(client) {
     db.exec(`
       CREATE TABLE IF NOT EXISTS cron_jobs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT UNIQUE NOT NULL,
+        name TEXT NOT NULL,
+        owner TEXT NOT NULL,
         schedule TEXT NOT NULL,
         message TEXT NOT NULL,
         enabled INTEGER NOT NULL DEFAULT 1,
@@ -13162,7 +13163,10 @@ async function getDatabase(client) {
       )
     `);
     db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_cron_jobs_name ON cron_jobs(name)
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_cron_jobs_name_owner ON cron_jobs(name, owner)
+    `);
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_cron_jobs_owner ON cron_jobs(owner)
     `);
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_cron_jobs_enabled ON cron_jobs(enabled)
@@ -13186,57 +13190,60 @@ async function getDatabase(client) {
   }
   return db;
 }
-async function createCronJob(client, name, schedule, message, enabled = true) {
+async function createCronJob(client, owner, name, schedule, message, enabled = true) {
   const database = await getDatabase(client);
   const stmt = database.prepare(`
-    INSERT INTO cron_jobs (name, schedule, message, enabled, created_at, last_run)
-    VALUES (?, ?, ?, ?, ?, NULL)
+    INSERT INTO cron_jobs (name, owner, schedule, message, enabled, created_at, last_run)
+    VALUES (?, ?, ?, ?, ?, ?, NULL)
   `);
-  stmt.run(name, schedule, message, enabled ? 1 : 0, Date.now());
+  stmt.run(name, owner, schedule, message, enabled ? 1 : 0, Date.now());
 }
-async function listCronJobs(client) {
+async function listCronJobs(client, owner) {
   const database = await getDatabase(client);
   const stmt = database.prepare(`
-    SELECT name, schedule, message, enabled, created_at, last_run
+    SELECT name, owner, schedule, message, enabled, created_at, last_run
     FROM cron_jobs
+    WHERE owner = ?
     ORDER BY name ASC
   `);
-  return stmt.all();
+  return stmt.all(owner);
 }
-async function deleteCronJob(client, name) {
+async function deleteCronJob(client, owner, name) {
   const database = await getDatabase(client);
   const deleteHistoryStmt = database.prepare(`
-    DELETE FROM cron_history WHERE job_name = ?
+    DELETE FROM cron_history WHERE job_name = ? AND EXISTS (
+      SELECT 1 FROM cron_jobs WHERE name = ? AND owner = ?
+    )
   `);
-  deleteHistoryStmt.run(name);
+  deleteHistoryStmt.run(name, name, owner);
   const stmt = database.prepare(`
-    DELETE FROM cron_jobs WHERE name = ?
+    DELETE FROM cron_jobs WHERE name = ? AND owner = ?
   `);
-  const result = stmt.run(name);
+  const result = stmt.run(name, owner);
   return result.changes > 0;
 }
-async function enableCronJob(client, name) {
+async function enableCronJob(client, owner, name) {
   const database = await getDatabase(client);
   const stmt = database.prepare(`
-    UPDATE cron_jobs SET enabled = 1 WHERE name = ?
+    UPDATE cron_jobs SET enabled = 1 WHERE name = ? AND owner = ?
   `);
-  const result = stmt.run(name);
+  const result = stmt.run(name, owner);
   return result.changes > 0;
 }
-async function disableCronJob(client, name) {
+async function disableCronJob(client, owner, name) {
   const database = await getDatabase(client);
   const stmt = database.prepare(`
-    UPDATE cron_jobs SET enabled = 0 WHERE name = ?
+    UPDATE cron_jobs SET enabled = 0 WHERE name = ? AND owner = ?
   `);
-  const result = stmt.run(name);
+  const result = stmt.run(name, owner);
   return result.changes > 0;
 }
-async function updateLastRun(client, name, timestamp) {
+async function updateLastRun(client, owner, name, timestamp) {
   const database = await getDatabase(client);
   const stmt = database.prepare(`
-    UPDATE cron_jobs SET last_run = ? WHERE name = ?
+    UPDATE cron_jobs SET last_run = ? WHERE name = ? AND owner = ?
   `);
-  stmt.run(timestamp, name);
+  stmt.run(timestamp, name, owner);
 }
 async function addHistoryEntry(client, jobName, executedAt, success2, errorMessage = null) {
   const database = await getDatabase(client);
@@ -13246,26 +13253,27 @@ async function addHistoryEntry(client, jobName, executedAt, success2, errorMessa
   `);
   stmt.run(jobName, executedAt, success2 ? 1 : 0, errorMessage);
 }
-async function getCronHistory(client, name, limit = 10) {
+async function getCronHistory(client, owner, name, limit = 10) {
   const database = await getDatabase(client);
   const stmt = database.prepare(`
-    SELECT job_name, executed_at, success, error_message
-    FROM cron_history
-    WHERE job_name = ?
-    ORDER BY executed_at DESC
+    SELECT ch.job_name, ch.executed_at, ch.success, ch.error_message
+    FROM cron_history ch
+    INNER JOIN cron_jobs cj ON ch.job_name = cj.name
+    WHERE ch.job_name = ? AND cj.owner = ?
+    ORDER BY ch.executed_at DESC
     LIMIT ?
   `);
-  return stmt.all(name, limit);
+  return stmt.all(name, owner, limit);
 }
-async function getEnabledJobs(client) {
+async function getEnabledJobs(client, owner) {
   const database = await getDatabase(client);
   const stmt = database.prepare(`
-    SELECT name, schedule, message, enabled, created_at, last_run
+    SELECT name, owner, schedule, message, enabled, created_at, last_run
     FROM cron_jobs
-    WHERE enabled = 1
+    WHERE enabled = 1 AND owner = ?
     ORDER BY name ASC
   `);
-  return stmt.all();
+  return stmt.all(owner);
 }
 function matchesCron(schedule, date5 = new Date) {
   try {
@@ -13288,8 +13296,8 @@ function getNextRunTime(schedule) {
     return null;
   }
 }
-function startCronWatch(client, sessionId) {
-  if (activeWatch) {
+function startCronWatch(client, owner, sessionId) {
+  if (activeWatches.has(owner)) {
     return;
   }
   const executedThisMinute = new Set;
@@ -13302,7 +13310,7 @@ function startCronWatch(client, sessionId) {
         executedThisMinute.clear();
         lastMinute = currentMinute;
       }
-      const jobs = await getEnabledJobs(client);
+      const jobs = await getEnabledJobs(client, owner);
       for (const job of jobs) {
         if (executedThisMinute.has(job.name)) {
           continue;
@@ -13313,21 +13321,28 @@ function startCronWatch(client, sessionId) {
         }
       }
     } catch (error45) {
-      console.error(`[Cron] Error in watch loop:`, error45);
+      console.error(`[Cron] Error in watch loop for owner ${owner}:`, error45);
     }
   }, 60000);
-  activeWatch = { interval };
+  activeWatches.set(owner, { interval });
 }
-function stopCronWatch() {
-  if (activeWatch) {
-    clearInterval(activeWatch.interval);
-    activeWatch = null;
+function stopCronWatch(owner) {
+  const watch = activeWatches.get(owner);
+  if (watch) {
+    clearInterval(watch.interval);
+    activeWatches.delete(owner);
   }
+}
+function stopAllCronWatches() {
+  for (const [owner, watch] of Array.from(activeWatches.entries())) {
+    clearInterval(watch.interval);
+  }
+  activeWatches.clear();
 }
 async function executeCronJob(client, sessionId, job) {
   const executedAt = Date.now();
   try {
-    await updateLastRun(client, job.name, executedAt);
+    await updateLastRun(client, job.owner, job.name, executedAt);
     await addHistoryEntry(client, job.name, executedAt, true);
     await injectCronMessage(client, sessionId, job);
   } catch (error45) {
@@ -13378,7 +13393,8 @@ var cronPlugin = async (ctx) => {
   const createCronJobTool = tool3({
     description: "Create a new scheduled cron job",
     args: {
-      name: z.string().describe("Unique job identifier"),
+      owner: z.string().describe("Owner identifier for this job (e.g., user name or session id)"),
+      name: z.string().describe("Unique job identifier (unique per owner)"),
       schedule: z.string().describe("5-element cron expression (e.g., '*/5 * * * *')"),
       message: z.string().describe("Message to inject when job fires"),
       enabled: z.boolean().optional().describe("Whether job is active (default: true)")
@@ -13389,23 +13405,25 @@ var cronPlugin = async (ctx) => {
         if (parts.length !== 5) {
           return `Error: Invalid cron schedule. Expected 5 elements (minute hour day-of-month month day-of-week), got ${parts.length}.`;
         }
-        await createCronJob(client, args.name, args.schedule, args.message, args.enabled ?? true);
-        return `Cron job "${args.name}" created successfully with schedule "${args.schedule}".`;
+        await createCronJob(client, args.owner, args.name, args.schedule, args.message, args.enabled ?? true);
+        return `Cron job "${args.name}" created successfully with schedule "${args.schedule}" for owner "${args.owner}".`;
       } catch (error45) {
         if (error45.message?.includes("UNIQUE constraint failed")) {
-          return `Error: A job with name "${args.name}" already exists.`;
+          return `Error: A job with name "${args.name}" already exists for owner "${args.owner}".`;
         }
         return `Error creating cron job: ${error45.message || error45}`;
       }
     }
   });
   const listCronJobsTool = tool3({
-    description: "List all cron jobs with status, schedule, last run time, and next scheduled run",
-    args: {},
-    async execute() {
-      const jobs = await listCronJobs(client);
+    description: "List all cron jobs for a specific owner with status, schedule, last run time, and next scheduled run",
+    args: {
+      owner: z.string().describe("Owner identifier to list jobs for")
+    },
+    async execute(args) {
+      const jobs = await listCronJobs(client, args.owner);
       if (jobs.length === 0) {
-        return "No cron jobs found.";
+        return `No cron jobs found for owner "${args.owner}".`;
       }
       const jobList = jobs.map((job) => {
         const status = job.enabled ? "\u2713 enabled" : "\u2717 disabled";
@@ -13415,79 +13433,87 @@ var cronPlugin = async (ctx) => {
     last: ${lastRun} \u2192 next: ${nextRun}`;
       }).join(`
 `);
-      return `Cron jobs (${jobs.length}):
+      return `Cron jobs for owner "${args.owner}" (${jobs.length}):
 ${jobList}`;
     }
   });
   const deleteCronJobTool = tool3({
-    description: "Remove a cron job by name",
+    description: "Remove a cron job by name for a specific owner",
     args: {
+      owner: z.string().describe("Owner identifier of the job"),
       name: z.string().describe("Name of the job to delete")
     },
     async execute(args) {
-      const deleted = await deleteCronJob(client, args.name);
+      const deleted = await deleteCronJob(client, args.owner, args.name);
       if (deleted) {
-        return `Cron job "${args.name}" deleted successfully.`;
+        return `Cron job "${args.name}" for owner "${args.owner}" deleted successfully.`;
       } else {
-        return `Error: No job found with name "${args.name}".`;
+        return `Error: No job found with name "${args.name}" for owner "${args.owner}".`;
       }
     }
   });
   const enableCronJobTool = tool3({
-    description: "Enable a previously disabled cron job",
+    description: "Enable a previously disabled cron job for a specific owner",
     args: {
+      owner: z.string().describe("Owner identifier of the job"),
       name: z.string().describe("Name of the job to enable")
     },
     async execute(args) {
-      const enabled = await enableCronJob(client, args.name);
+      const enabled = await enableCronJob(client, args.owner, args.name);
       if (enabled) {
-        return `Cron job "${args.name}" enabled successfully.`;
+        return `Cron job "${args.name}" for owner "${args.owner}" enabled successfully.`;
       } else {
-        return `Error: No job found with name "${args.name}".`;
+        return `Error: No job found with name "${args.name}" for owner "${args.owner}".`;
       }
     }
   });
   const disableCronJobTool = tool3({
-    description: "Disable an enabled cron job (pauses execution)",
+    description: "Disable an enabled cron job for a specific owner (pauses execution)",
     args: {
+      owner: z.string().describe("Owner identifier of the job"),
       name: z.string().describe("Name of the job to disable")
     },
     async execute(args) {
-      const disabled = await disableCronJob(client, args.name);
+      const disabled = await disableCronJob(client, args.owner, args.name);
       if (disabled) {
-        return `Cron job "${args.name}" disabled successfully.`;
+        return `Cron job "${args.name}" for owner "${args.owner}" disabled successfully.`;
       } else {
-        return `Error: No job found with name "${args.name}".`;
+        return `Error: No job found with name "${args.name}" for owner "${args.owner}".`;
       }
     }
   });
-  const watchCronJobsTool = tool3({
-    description: "Start the scheduler to monitor and execute cron jobs",
-    args: {},
+  const startWatchingCronTool = tool3({
+    description: "IMPORTANT: Creating a cron job does NOT automatically start watching! You must explicitly call this tool to start watching. Start the scheduler to monitor and execute cron jobs for a specific owner. The scheduler polls every minute and injects messages when jobs fire.",
+    args: {
+      owner: z.string().describe("Owner identifier to watch jobs for")
+    },
     async execute(args, toolCtx) {
       const sessionId = toolCtx.sessionID;
-      startCronWatch(client, sessionId);
-      return "Cron job scheduler started. Jobs will be checked every minute and messages will be injected when jobs fire.";
+      startCronWatch(client, args.owner, sessionId);
+      return `Cron job scheduler started for owner "${args.owner}". Jobs will be checked every minute and messages will be injected when jobs fire.`;
     }
   });
   const stopWatchingCronTool = tool3({
-    description: "Stop the cron job scheduler",
-    args: {},
-    async execute() {
-      stopCronWatch();
-      return "Cron job scheduler stopped.";
+    description: "Stop the cron job scheduler for a specific owner",
+    args: {
+      owner: z.string().describe("Owner identifier to stop watching jobs for")
+    },
+    async execute(args) {
+      stopCronWatch(args.owner);
+      return `Cron job scheduler stopped for owner "${args.owner}".`;
     }
   });
   const getCronHistoryTool = tool3({
-    description: "Get execution history for a cron job",
+    description: "Get execution history for a cron job for a specific owner",
     args: {
+      owner: z.string().describe("Owner identifier of the job"),
       name: z.string().describe("Name of the job"),
       limit: z.number().optional().describe("Number of recent executions to return (default: 10)")
     },
     async execute(args) {
-      const history = await getCronHistory(client, args.name, args.limit ?? 10);
+      const history = await getCronHistory(client, args.owner, args.name, args.limit ?? 10);
       if (history.length === 0) {
-        return `No execution history found for job "${args.name}".`;
+        return `No execution history found for job "${args.name}" for owner "${args.owner}".`;
       }
       const historyList = history.map((entry, i) => {
         const status = entry.success ? "\u2713 success" : "\u2717 failed";
@@ -13496,7 +13522,7 @@ ${jobList}`;
         return `  ${i + 1}. ${time3} [${status}]${error45}`;
       }).join(`
 `);
-      return `Execution history for "${args.name}" (${history.length} entries):
+      return `Execution history for "${args.name}" for owner "${args.owner}" (${history.length} entries):
 ${historyList}`;
     }
   });
@@ -13507,18 +13533,18 @@ ${historyList}`;
       delete_cron_job: deleteCronJobTool,
       enable_cron_job: enableCronJobTool,
       disable_cron_job: disableCronJobTool,
-      watch_cron_jobs: watchCronJobsTool,
+      start_watching_cron_jobs: startWatchingCronTool,
       stop_watching_cron: stopWatchingCronTool,
       get_cron_history: getCronHistoryTool
     },
     config: async (input) => {
       input.experimental ??= {};
       input.experimental.primary_tools ??= [];
-      input.experimental.primary_tools.push("create_cron_job", "list_cron_jobs", "delete_cron_job", "enable_cron_job", "disable_cron_job", "watch_cron_jobs", "stop_watching_cron", "get_cron_history");
+      input.experimental.primary_tools.push("create_cron_job", "list_cron_jobs", "delete_cron_job", "enable_cron_job", "disable_cron_job", "start_watching_cron_jobs", "stop_watching_cron", "get_cron_history");
     },
     hooks: {
       "session.end": async () => {
-        stopCronWatch();
+        stopAllCronWatches();
       }
     }
   };
