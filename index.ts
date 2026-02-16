@@ -10,7 +10,7 @@ import { Cron } from "croner";
 
 interface CronJob {
   name: string;
-  owner: string;
+  agent_name: string;
   schedule: string;
   message: string;
   enabled: number;
@@ -32,7 +32,7 @@ interface CronHistory {
 let dbFile: string | null = null;
 let db: Database | null = null;
 
-// Track active watch intervals per owner (in-memory only)
+// Track active watch intervals per agent (in-memory only)
 const activeWatches = new Map<string, { interval: NodeJS.Timeout }>();
 
 async function getDbFile(client: ReturnType<typeof createOpencodeClient>): Promise<string> {
@@ -65,12 +65,12 @@ async function getDatabase(client: ReturnType<typeof createOpencodeClient>): Pro
       )
     `);
     
-    // Create unique index on name+owner for fast lookups and uniqueness
+    // Create unique index on name+agent_name for fast lookups and uniqueness
     db.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS idx_cron_jobs_name_owner ON cron_jobs(name, owner)
     `);
     
-    // Create index on owner for filtering by owner
+    // Create index on agent_name for filtering by agent_name
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_cron_jobs_owner ON cron_jobs(owner)
     `);
@@ -107,7 +107,7 @@ async function getDatabase(client: ReturnType<typeof createOpencodeClient>): Pro
 
 async function createCronJob(
   client: ReturnType<typeof createOpencodeClient>,
-  owner: string,
+  agent_name: string,
   name: string,
   schedule: string,
   message: string,
@@ -118,90 +118,90 @@ async function createCronJob(
     INSERT INTO cron_jobs (name, owner, schedule, message, enabled, created_at, last_run)
     VALUES (?, ?, ?, ?, ?, ?, NULL)
   `);
-  stmt.run(name, owner, schedule, message, enabled ? 1 : 0, Date.now());
+  stmt.run(name, agent_name, schedule, message, enabled ? 1 : 0, Date.now());
 }
 
 async function getCronJob(
   client: ReturnType<typeof createOpencodeClient>,
-  owner: string,
+  agent_name: string,
   name: string
 ): Promise<CronJob | null> {
   const database = await getDatabase(client);
   const stmt = database.prepare(`
-    SELECT name, owner, schedule, message, enabled, created_at, last_run
+    SELECT name, owner as agent_name, schedule, message, enabled, created_at, last_run
     FROM cron_jobs
     WHERE name = ? AND owner = ?
   `);
-  const result = stmt.get(name, owner) as CronJob | undefined;
+  const result = stmt.get(name, agent_name) as CronJob | undefined;
   return result || null;
 }
 
 async function listCronJobs(
   client: ReturnType<typeof createOpencodeClient>,
-  owner: string
+  agent_name: string
 ): Promise<CronJob[]> {
   const database = await getDatabase(client);
   const stmt = database.prepare(`
-    SELECT name, owner, schedule, message, enabled, created_at, last_run
+    SELECT name, owner as agent_name, schedule, message, enabled, created_at, last_run
     FROM cron_jobs
     WHERE owner = ?
     ORDER BY name ASC
   `);
-  return stmt.all(owner) as CronJob[];
+  return stmt.all(agent_name) as CronJob[];
 }
 
 async function deleteCronJob(
   client: ReturnType<typeof createOpencodeClient>,
-  owner: string,
+  agent_name: string,
   name: string
 ): Promise<boolean> {
   const database = await getDatabase(client);
   
-  // First delete history (only for jobs owned by this owner)
+  // First delete history (only for jobs owned by this agent)
   const deleteHistoryStmt = database.prepare(`
     DELETE FROM cron_history WHERE job_name = ? AND EXISTS (
       SELECT 1 FROM cron_jobs WHERE name = ? AND owner = ?
     )
   `);
-  deleteHistoryStmt.run(name, name, owner);
+  deleteHistoryStmt.run(name, name, agent_name);
   
   // Then delete job
   const stmt = database.prepare(`
     DELETE FROM cron_jobs WHERE name = ? AND owner = ?
   `);
-  const result = stmt.run(name, owner);
+  const result = stmt.run(name, agent_name);
   return result.changes > 0;
 }
 
 async function enableCronJob(
   client: ReturnType<typeof createOpencodeClient>,
-  owner: string,
+  agent_name: string,
   name: string
 ): Promise<boolean> {
   const database = await getDatabase(client);
   const stmt = database.prepare(`
     UPDATE cron_jobs SET enabled = 1 WHERE name = ? AND owner = ?
   `);
-  const result = stmt.run(name, owner);
+  const result = stmt.run(name, agent_name);
   return result.changes > 0;
 }
 
 async function disableCronJob(
   client: ReturnType<typeof createOpencodeClient>,
-  owner: string,
+  agent_name: string,
   name: string
 ): Promise<boolean> {
   const database = await getDatabase(client);
   const stmt = database.prepare(`
     UPDATE cron_jobs SET enabled = 0 WHERE name = ? AND owner = ?
   `);
-  const result = stmt.run(name, owner);
+  const result = stmt.run(name, agent_name);
   return result.changes > 0;
 }
 
 async function updateLastRun(
   client: ReturnType<typeof createOpencodeClient>,
-  owner: string,
+  agent_name: string,
   name: string,
   timestamp: number
 ): Promise<void> {
@@ -209,7 +209,7 @@ async function updateLastRun(
   const stmt = database.prepare(`
     UPDATE cron_jobs SET last_run = ? WHERE name = ? AND owner = ?
   `);
-  stmt.run(timestamp, name, owner);
+  stmt.run(timestamp, name, agent_name);
 }
 
 async function addHistoryEntry(
@@ -229,7 +229,7 @@ async function addHistoryEntry(
 
 async function getCronHistory(
   client: ReturnType<typeof createOpencodeClient>,
-  owner: string,
+  agent_name: string,
   name: string,
   limit: number = 10
 ): Promise<CronHistory[]> {
@@ -242,21 +242,21 @@ async function getCronHistory(
     ORDER BY ch.executed_at DESC
     LIMIT ?
   `);
-  return stmt.all(name, owner, limit) as CronHistory[];
+  return stmt.all(name, agent_name, limit) as CronHistory[];
 }
 
 async function getEnabledJobs(
   client: ReturnType<typeof createOpencodeClient>,
-  owner: string
+  agent_name: string
 ): Promise<CronJob[]> {
   const database = await getDatabase(client);
   const stmt = database.prepare(`
-    SELECT name, owner, schedule, message, enabled, created_at, last_run
+    SELECT name, owner as agent_name, schedule, message, enabled, created_at, last_run
     FROM cron_jobs
     WHERE enabled = 1 AND owner = ?
     ORDER BY name ASC
   `);
-  return stmt.all(owner) as CronJob[];
+  return stmt.all(agent_name) as CronJob[];
 }
 
 // =============================================================================
@@ -309,16 +309,16 @@ function getNextRunTime(schedule: string): string | null {
 // =============================================================================
 
 /**
- * Start the cron scheduler to watch for and execute jobs for a specific owner.
+ * Start the cron scheduler to watch for and execute jobs for a specific agent_name.
  * Polls every minute and injects messages for due jobs.
  */
 function startCronWatch(
   client: ReturnType<typeof createOpencodeClient>,
-  owner: string,
+  agent_name: string,
   sessionId: string
 ): void {
-  // Don't start multiple watches for the same owner
-  if (activeWatches.has(owner)) {
+  // Don't start multiple watches for the same agent_name
+  if (activeWatches.has(agent_name)) {
     return;
   }
 
@@ -337,8 +337,8 @@ function startCronWatch(
         lastMinute = currentMinute;
       }
       
-      // Get all enabled jobs for this owner
-      const jobs = await getEnabledJobs(client, owner);
+      // Get all enabled jobs for this agent_name
+      const jobs = await getEnabledJobs(client, agent_name);
       
       for (const job of jobs) {
         // Skip if already executed this minute
@@ -356,21 +356,21 @@ function startCronWatch(
         }
       }
     } catch (error) {
-      console.error(`[Cron] Error in watch loop for owner ${owner}:`, error);
+      console.error(`[Cron] Error in watch loop for agent_name ${agent_name}:`, error);
     }
   }, 60000); // Poll every minute
 
-  activeWatches.set(owner, { interval });
+  activeWatches.set(agent_name, { interval });
 }
 
 /**
- * Stop the cron scheduler for a specific owner.
+ * Stop the cron scheduler for a specific agent_name.
  */
-function stopCronWatch(owner: string): void {
-  const watch = activeWatches.get(owner);
+function stopCronWatch(agent_name: string): void {
+  const watch = activeWatches.get(agent_name);
   if (watch) {
     clearInterval(watch.interval);
-    activeWatches.delete(owner);
+    activeWatches.delete(agent_name);
   }
 }
 
@@ -378,7 +378,7 @@ function stopCronWatch(owner: string): void {
  * Stop all cron watches.
  */
 function stopAllCronWatches(): void {
-  for (const [owner, watch] of Array.from(activeWatches.entries())) {
+  for (const [agent_name, watch] of Array.from(activeWatches.entries())) {
     clearInterval(watch.interval);
   }
   activeWatches.clear();
@@ -396,7 +396,7 @@ async function executeCronJob(
   
   try {
     // Update last run time
-    await updateLastRun(client, job.owner, job.name, executedAt);
+    await updateLastRun(client, job.agent_name, job.name, executedAt);
     
     // Add history entry
     await addHistoryEntry(client, job.name, executedAt, true);
@@ -474,8 +474,8 @@ const cronPlugin: Plugin = async (ctx) => {
   const createCronJobTool = tool({
     description: "Create a new scheduled cron job",
     args: {
-      owner: z.string().describe("Owner identifier for this job (e.g., user name or session id)"),
-      name: z.string().describe("Unique job identifier (unique per owner)"),
+      agent_name: z.string().describe("Owner identifier for this job (e.g., user name or session id)"),
+      name: z.string().describe("Unique job identifier (unique per agent_name)"),
       schedule: z.string().describe("5-element cron expression (e.g., '*/5 * * * *')"),
       message: z.string().describe("Message to inject when job fires"),
       enabled: z.boolean().optional().describe("Whether job is active (default: true)"),
@@ -488,11 +488,11 @@ const cronPlugin: Plugin = async (ctx) => {
           return `Error: Invalid cron schedule. Expected 5 elements (minute hour day-of-month month day-of-week), got ${parts.length}.`;
         }
         
-        await createCronJob(client, args.owner, args.name, args.schedule, args.message, args.enabled ?? true);
-        return `Cron job "${args.name}" created successfully with schedule "${args.schedule}" for owner "${args.owner}".`;
+        await createCronJob(client, args.agent_name, args.name, args.schedule, args.message, args.enabled ?? true);
+        return `Cron job "${args.name}" created successfully with schedule "${args.schedule}" for agent_name "${args.agent_name}".`;
       } catch (error: any) {
         if (error.message?.includes("UNIQUE constraint failed")) {
-          return `Error: A job with name "${args.name}" already exists for owner "${args.owner}".`;
+          return `Error: A job with name "${args.name}" already exists for agent_name "${args.agent_name}".`;
         }
         return `Error creating cron job: ${error.message || error}`;
       }
@@ -500,15 +500,15 @@ const cronPlugin: Plugin = async (ctx) => {
   });
 
   const listCronJobsTool = tool({
-    description: "List all cron jobs for a specific owner with status, schedule, last run time, and next scheduled run",
+    description: "List all cron jobs for a specific agent_name with status, schedule, last run time, and next scheduled run",
     args: {
-      owner: z.string().describe("Owner identifier to list jobs for"),
+      agent_name: z.string().describe("Owner identifier to list jobs for"),
     },
     async execute(args) {
-      const jobs = await listCronJobs(client, args.owner);
+      const jobs = await listCronJobs(client, args.agent_name);
       
       if (jobs.length === 0) {
-        return `No cron jobs found for owner "${args.owner}".`;
+        return `No cron jobs found for agent_name "${args.agent_name}".`;
       }
       
       const jobList = jobs.map(job => {
@@ -518,96 +518,96 @@ const cronPlugin: Plugin = async (ctx) => {
         return `  - ${job.name}: ${job.schedule} [${status}]\n    last: ${lastRun} → next: ${nextRun}`;
       }).join("\n");
       
-      return `Cron jobs for owner "${args.owner}" (${jobs.length}):\n${jobList}`;
+      return `Cron jobs for agent_name "${args.agent_name}" (${jobs.length}):\n${jobList}`;
     },
   });
 
   const deleteCronJobTool = tool({
-    description: "Remove a cron job by name for a specific owner",
+    description: "Remove a cron job by name for a specific agent_name",
     args: {
-      owner: z.string().describe("Owner identifier of the job"),
+      agent_name: z.string().describe("Owner identifier of the job"),
       name: z.string().describe("Name of the job to delete"),
     },
     async execute(args) {
-      const deleted = await deleteCronJob(client, args.owner, args.name);
+      const deleted = await deleteCronJob(client, args.agent_name, args.name);
       if (deleted) {
-        return `Cron job "${args.name}" for owner "${args.owner}" deleted successfully.`;
+        return `Cron job "${args.name}" for agent_name "${args.agent_name}" deleted successfully.`;
       } else {
-        return `Error: No job found with name "${args.name}" for owner "${args.owner}".`;
+        return `Error: No job found with name "${args.name}" for agent_name "${args.agent_name}".`;
       }
     },
   });
 
   const enableCronJobTool = tool({
-    description: "Enable a previously disabled cron job for a specific owner",
+    description: "Enable a previously disabled cron job for a specific agent_name",
     args: {
-      owner: z.string().describe("Owner identifier of the job"),
+      agent_name: z.string().describe("Owner identifier of the job"),
       name: z.string().describe("Name of the job to enable"),
     },
     async execute(args) {
-      const enabled = await enableCronJob(client, args.owner, args.name);
+      const enabled = await enableCronJob(client, args.agent_name, args.name);
       if (enabled) {
-        return `Cron job "${args.name}" for owner "${args.owner}" enabled successfully.`;
+        return `Cron job "${args.name}" for agent_name "${args.agent_name}" enabled successfully.`;
       } else {
-        return `Error: No job found with name "${args.name}" for owner "${args.owner}".`;
+        return `Error: No job found with name "${args.name}" for agent_name "${args.agent_name}".`;
       }
     },
   });
 
   const disableCronJobTool = tool({
-    description: "Disable an enabled cron job for a specific owner (pauses execution)",
+    description: "Disable an enabled cron job for a specific agent_name (pauses execution)",
     args: {
-      owner: z.string().describe("Owner identifier of the job"),
+      agent_name: z.string().describe("Owner identifier of the job"),
       name: z.string().describe("Name of the job to disable"),
     },
     async execute(args) {
-      const disabled = await disableCronJob(client, args.owner, args.name);
+      const disabled = await disableCronJob(client, args.agent_name, args.name);
       if (disabled) {
-        return `Cron job "${args.name}" for owner "${args.owner}" disabled successfully.`;
+        return `Cron job "${args.name}" for agent_name "${args.agent_name}" disabled successfully.`;
       } else {
-        return `Error: No job found with name "${args.name}" for owner "${args.owner}".`;
+        return `Error: No job found with name "${args.name}" for agent_name "${args.agent_name}".`;
       }
     },
   });
 
   const startWatchingCronTool = tool({
-    description: "IMPORTANT: Creating a cron job does NOT automatically start watching! You must explicitly call this tool to start watching. Start the scheduler to monitor and execute cron jobs for a specific owner. The scheduler polls every minute and injects messages when jobs fire.",
+    description: "IMPORTANT: Creating a cron job does NOT automatically start watching! You must explicitly call this tool to start watching. Start the scheduler to monitor and execute cron jobs for a specific agent_name. The scheduler polls every minute and injects messages when jobs fire.",
     args: {
-      owner: z.string().describe("Owner identifier to watch jobs for"),
+      agent_name: z.string().describe("Owner identifier to watch jobs for"),
     },
     async execute(args, toolCtx) {
       const sessionId = toolCtx.sessionID;
       
-      // Start the scheduler for this owner
-      startCronWatch(client, args.owner, sessionId);
+      // Start the scheduler for this agent_name
+      startCronWatch(client, args.agent_name, sessionId);
       
-      return `Cron job scheduler started for owner "${args.owner}". Jobs will be checked every minute and messages will be injected when jobs fire.`;
+      return `Cron job scheduler started for agent_name "${args.agent_name}". Jobs will be checked every minute and messages will be injected when jobs fire.`;
     },
   });
 
   const stopWatchingCronTool = tool({
-    description: "Stop the cron job scheduler for a specific owner",
+    description: "Stop the cron job scheduler for a specific agent_name",
     args: {
-      owner: z.string().describe("Owner identifier to stop watching jobs for"),
+      agent_name: z.string().describe("Owner identifier to stop watching jobs for"),
     },
     async execute(args) {
-      stopCronWatch(args.owner);
-      return `Cron job scheduler stopped for owner "${args.owner}".`;
+      stopCronWatch(args.agent_name);
+      return `Cron job scheduler stopped for agent_name "${args.agent_name}".`;
     },
   });
 
   const getCronHistoryTool = tool({
-    description: "Get execution history for a cron job for a specific owner",
+    description: "Get execution history for a cron job for a specific agent_name",
     args: {
-      owner: z.string().describe("Owner identifier of the job"),
+      agent_name: z.string().describe("Owner identifier of the job"),
       name: z.string().describe("Name of the job"),
       limit: z.number().optional().describe("Number of recent executions to return (default: 10)"),
     },
     async execute(args) {
-      const history = await getCronHistory(client, args.owner, args.name, args.limit ?? 10);
+      const history = await getCronHistory(client, args.agent_name, args.name, args.limit ?? 10);
       
       if (history.length === 0) {
-        return `No execution history found for job "${args.name}" for owner "${args.owner}".`;
+        return `No execution history found for job "${args.name}" for agent_name "${args.agent_name}".`;
       }
       
       const historyList = history.map((entry, i) => {
@@ -617,7 +617,7 @@ const cronPlugin: Plugin = async (ctx) => {
         return `  ${i + 1}. ${time} [${status}]${error}`;
       }).join("\n");
       
-      return `Execution history for "${args.name}" for owner "${args.owner}" (${history.length} entries):\n${historyList}`;
+      return `Execution history for "${args.name}" for agent_name "${args.agent_name}" (${history.length} entries):\n${historyList}`;
     },
   });
 
