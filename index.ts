@@ -385,6 +385,13 @@ function stopAllCronWatches(): void {
 }
 
 /**
+ * Check if a cron watch is active for a specific agent_name.
+ */
+function isCronWatchActive(agent_name: string): boolean {
+  return activeWatches.has(agent_name);
+}
+
+/**
  * Execute a cron job: update last_run, add history, and inject message.
  */
 async function executeCronJob(
@@ -621,6 +628,22 @@ const cronPlugin: Plugin = async (ctx) => {
     },
   });
 
+  const checkCronWatchStatusTool = tool({
+    description: "Check if a cron job scheduler is actively watching for a specific agent_name",
+    args: {
+      agent_name: z.string().describe("Owner identifier to check watch status for"),
+    },
+    async execute(args) {
+      const isActive = isCronWatchActive(args.agent_name);
+      
+      if (isActive) {
+        return `Cron job scheduler is ACTIVE for agent_name "${args.agent_name}". Jobs are being monitored and will execute on schedule.`;
+      } else {
+        return `Cron job scheduler is NOT ACTIVE for agent_name "${args.agent_name}". Use start_watching_cron_jobs to begin monitoring jobs.`;
+      }
+    },
+  });
+
   return {
     // Register tools
     tool: {
@@ -630,8 +653,9 @@ const cronPlugin: Plugin = async (ctx) => {
       enable_cron_job: enableCronJobTool,
       disable_cron_job: disableCronJobTool,
       start_watching_cron_jobs: startWatchingCronTool,
-      stop_watching_cron: stopWatchingCronTool,
+      stop_watching_cron_jobs: stopWatchingCronTool,
       get_cron_history: getCronHistoryTool,
+      check_cron_jobs_watch_status: checkCronWatchStatusTool,
     },
 
     // Hook: Add tools to primary_tools config
@@ -645,8 +669,9 @@ const cronPlugin: Plugin = async (ctx) => {
         "enable_cron_job",
         "disable_cron_job",
         "start_watching_cron_jobs",
-        "stop_watching_cron",
-        "get_cron_history"
+        "stop_watching_cron_jobs",
+        "get_cron_history",
+        "check_cron_jobs_watch_status"
       );
     },
 

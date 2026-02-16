@@ -13339,6 +13339,9 @@ function stopAllCronWatches() {
   }
   activeWatches.clear();
 }
+function isCronWatchActive(agent_name) {
+  return activeWatches.has(agent_name);
+}
 async function executeCronJob(client, sessionId, job) {
   const executedAt = Date.now();
   try {
@@ -13526,6 +13529,20 @@ ${jobList}`;
 ${historyList}`;
     }
   });
+  const checkCronWatchStatusTool = tool3({
+    description: "Check if a cron job scheduler is actively watching for a specific agent_name",
+    args: {
+      agent_name: z.string().describe("Owner identifier to check watch status for")
+    },
+    async execute(args) {
+      const isActive = isCronWatchActive(args.agent_name);
+      if (isActive) {
+        return `Cron job scheduler is ACTIVE for agent_name "${args.agent_name}". Jobs are being monitored and will execute on schedule.`;
+      } else {
+        return `Cron job scheduler is NOT ACTIVE for agent_name "${args.agent_name}". Use start_watching_cron_jobs to begin monitoring jobs.`;
+      }
+    }
+  });
   return {
     tool: {
       create_cron_job: createCronJobTool,
@@ -13534,13 +13551,14 @@ ${historyList}`;
       enable_cron_job: enableCronJobTool,
       disable_cron_job: disableCronJobTool,
       start_watching_cron_jobs: startWatchingCronTool,
-      stop_watching_cron: stopWatchingCronTool,
-      get_cron_history: getCronHistoryTool
+      stop_watching_cron_jobs: stopWatchingCronTool,
+      get_cron_history: getCronHistoryTool,
+      check_cron_jobs_watch_status: checkCronWatchStatusTool
     },
     config: async (input) => {
       input.experimental ??= {};
       input.experimental.primary_tools ??= [];
-      input.experimental.primary_tools.push("create_cron_job", "list_cron_jobs", "delete_cron_job", "enable_cron_job", "disable_cron_job", "start_watching_cron_jobs", "stop_watching_cron", "get_cron_history");
+      input.experimental.primary_tools.push("create_cron_job", "list_cron_jobs", "delete_cron_job", "enable_cron_job", "disable_cron_job", "start_watching_cron_jobs", "stop_watching_cron_jobs", "get_cron_history", "check_cron_jobs_watch_status");
     },
     hooks: {
       "session.end": async () => {
