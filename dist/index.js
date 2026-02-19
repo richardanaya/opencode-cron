@@ -13137,7 +13137,7 @@ var R = class {
 // index.ts
 var dbFile = null;
 var db = null;
-var activeWatches = new Map;
+var activeCronJobs = new Map;
 async function getDbFile(client) {
   if (!dbFile) {
     const result = await client.path.get();
@@ -13156,12 +13156,16 @@ async function getDatabase(client) {
         name TEXT NOT NULL,
         owner TEXT NOT NULL,
         schedule TEXT NOT NULL,
+        timezone TEXT,
         message TEXT NOT NULL,
         enabled INTEGER NOT NULL DEFAULT 1,
         created_at INTEGER NOT NULL,
         last_run INTEGER
       )
     `);
+    try {
+      db.exec(`ALTER TABLE cron_jobs ADD COLUMN timezone TEXT`);
+    } catch (e) {}
     db.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS idx_cron_jobs_name_owner ON cron_jobs(name, owner)
     `);
@@ -13190,18 +13194,18 @@ async function getDatabase(client) {
   }
   return db;
 }
-async function createCronJob(client, agent_name, name, schedule, message, enabled = true) {
+async function createCronJob(client, agent_name, name, schedule, timezone, message, enabled = true) {
   const database = await getDatabase(client);
   const stmt = database.prepare(`
-    INSERT INTO cron_jobs (name, owner, schedule, message, enabled, created_at, last_run)
-    VALUES (?, ?, ?, ?, ?, ?, NULL)
+    INSERT INTO cron_jobs (name, owner, schedule, timezone, message, enabled, created_at, last_run)
+    VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
   `);
-  stmt.run(name, agent_name, schedule, message, enabled ? 1 : 0, Date.now());
+  stmt.run(name, agent_name, schedule, timezone, message, enabled ? 1 : 0, Date.now());
 }
 async function listCronJobs(client, agent_name) {
   const database = await getDatabase(client);
   const stmt = database.prepare(`
-    SELECT name, owner as agent_name, schedule, message, enabled, created_at, last_run
+    SELECT name, owner as agent_name, schedule, timezone, message, enabled, created_at, last_run
     FROM cron_jobs
     WHERE owner = ?
     ORDER BY name ASC
@@ -13268,83 +13272,100 @@ async function getCronHistory(client, agent_name, name, limit = 10) {
 async function getEnabledJobs(client, agent_name) {
   const database = await getDatabase(client);
   const stmt = database.prepare(`
-    SELECT name, owner as agent_name, schedule, message, enabled, created_at, last_run
+    SELECT name, owner as agent_name, schedule, timezone, message, enabled, created_at, last_run
     FROM cron_jobs
     WHERE enabled = 1 AND owner = ?
     ORDER BY name ASC
   `);
   return stmt.all(agent_name);
 }
-function matchesCron(schedule, date5 = new Date) {
+function getNextRunTime(schedule, timezone) {
   try {
-    const job = new R(schedule, { legacyMode: true });
-    const startOfMinute = new Date(date5.getFullYear(), date5.getMonth(), date5.getDate(), date5.getHours(), date5.getMinutes(), 0, 0);
-    const checkFrom = new Date(startOfMinute.getTime() - 1000);
-    const nextRun = job.nextRun(checkFrom);
-    return nextRun?.getTime() === startOfMinute.getTime();
-  } catch (error45) {
-    console.error(`[Cron] Error parsing schedule "${schedule}":`, error45);
-    return false;
-  }
-}
-function getNextRunTime(schedule) {
-  try {
-    const job = new R(schedule, { legacyMode: true });
+    const options = {};
+    if (timezone) {
+      options.timezone = timezone;
+    }
+    const job = new R(schedule, options);
     const nextRun = job.nextRun();
     return nextRun?.toISOString() || null;
   } catch (error45) {
     return null;
   }
 }
-function startCronWatch(client, agent_name, sessionId) {
-  if (activeWatches.has(agent_name)) {
+function isValidSchedule(schedule) {
+  try {
+    new R(schedule);
+    return true;
+  } catch (error45) {
+    return false;
+  }
+}
+async function startCronWatch(client, agent_name, sessionId) {
+  if (activeCronJobs.has(agent_name)) {
     return;
   }
-  const executedThisMinute = new Set;
-  let lastMinute = -1;
-  const interval = setInterval(async () => {
+  const agentJobs = new Map;
+  activeCronJobs.set(agent_name, agentJobs);
+  const jobs = await getEnabledJobs(client, agent_name);
+  for (const job of jobs) {
     try {
-      const now = new Date;
-      const currentMinute = now.getMinutes();
-      if (currentMinute !== lastMinute) {
-        executedThisMinute.clear();
-        lastMinute = currentMinute;
-      }
-      const jobs = await getEnabledJobs(client, agent_name);
-      for (const job of jobs) {
-        if (executedThisMinute.has(job.name)) {
-          continue;
-        }
-        if (matchesCron(job.schedule, now)) {
-          executedThisMinute.add(job.name);
-          await executeCronJob(client, sessionId, job);
-        }
+      const cronJob = createCronerJob(client, sessionId, job);
+      if (cronJob) {
+        agentJobs.set(job.name, cronJob);
       }
     } catch (error45) {
-      console.error(`[Cron] Error in watch loop for agent_name ${agent_name}:`, error45);
+      console.error(`[Cron] Failed to create job "${job.name}" for agent_name "${agent_name}":`, error45);
     }
-  }, 60000);
-  activeWatches.set(agent_name, { interval });
+  }
+  console.log(`[Cron] Started native scheduler for agent_name "${agent_name}" with ${agentJobs.size} jobs`);
+}
+function createCronerJob(client, sessionId, job) {
+  try {
+    const options = {
+      protect: true,
+      start: true
+    };
+    if (job.timezone) {
+      options.timezone = job.timezone;
+    }
+    const cronJob = new R(job.schedule, options, async () => {
+      await executeCronJob(client, sessionId, job);
+    });
+    return cronJob;
+  } catch (error45) {
+    console.error(`[Cron] Error creating Croner job "${job.name}":`, error45);
+    return null;
+  }
 }
 function stopCronWatch(agent_name) {
-  const watch = activeWatches.get(agent_name);
-  if (watch) {
-    clearInterval(watch.interval);
-    activeWatches.delete(agent_name);
+  const agentJobs = activeCronJobs.get(agent_name);
+  if (agentJobs) {
+    for (const [jobName, cronJob] of agentJobs.entries()) {
+      cronJob.stop();
+      console.log(`[Cron] Stopped job "${jobName}" for agent_name "${agent_name}"`);
+    }
+    agentJobs.clear();
+    activeCronJobs.delete(agent_name);
+    console.log(`[Cron] Stopped all jobs for agent_name "${agent_name}"`);
   }
 }
 function stopAllCronWatches() {
-  for (const [agent_name, watch] of Array.from(activeWatches.entries())) {
-    clearInterval(watch.interval);
+  for (const [agent_name, agentJobs] of activeCronJobs.entries()) {
+    for (const [jobName, cronJob] of agentJobs.entries()) {
+      cronJob.stop();
+    }
+    agentJobs.clear();
+    console.log(`[Cron] Stopped all jobs for agent_name "${agent_name}"`);
   }
-  activeWatches.clear();
+  activeCronJobs.clear();
 }
 function isCronWatchActive(agent_name) {
-  return activeWatches.has(agent_name);
+  return activeCronJobs.has(agent_name);
 }
 async function executeCronJob(client, sessionId, job) {
   const executedAt = Date.now();
   try {
+    console.log(`[Cron] Executing job "${job.name}" for agent_name "${job.agent_name}" at ${new Date().toISOString()}`);
     await updateLastRun(client, job.agent_name, job.name, executedAt);
     await addHistoryEntry(client, job.name, executedAt, true);
     await injectCronMessage(client, sessionId, job);
@@ -13394,22 +13415,30 @@ var cronPlugin = async (ctx) => {
   const { tool: tool3 } = await Promise.resolve().then(() => (init_dist(), exports_dist));
   const z = tool3.schema;
   const createCronJobTool = tool3({
-    description: "Create a new scheduled cron job",
+    description: "Create a new scheduled cron job with optional timezone support",
     args: {
       agent_name: z.string().describe("Owner identifier for this job (e.g., user name or session id)"),
       name: z.string().describe("Unique job identifier (unique per agent_name)"),
-      schedule: z.string().describe("5-element cron expression (e.g., '*/5 * * * *')"),
+      schedule: z.string().describe("5-element cron expression (e.g., '*/5 * * * *' for every 5 minutes, '0 9 * * 1-5' for weekdays at 9am)"),
       message: z.string().describe("Message to inject when job fires"),
+      timezone: z.string().optional().describe("IANA timezone (e.g., 'America/Los_Angeles', 'America/New_York'). Uses system timezone if not specified."),
       enabled: z.boolean().optional().describe("Whether job is active (default: true)")
     },
     async execute(args) {
       try {
-        const parts = args.schedule.trim().split(/\s+/);
-        if (parts.length !== 5) {
-          return `Error: Invalid cron schedule. Expected 5 elements (minute hour day-of-month month day-of-week), got ${parts.length}.`;
+        if (!isValidSchedule(args.schedule)) {
+          return `Error: Invalid cron schedule "${args.schedule}". Please provide a valid 5-element cron expression.`;
         }
-        await createCronJob(client, args.agent_name, args.name, args.schedule, args.message, args.enabled ?? true);
-        return `Cron job "${args.name}" created successfully with schedule "${args.schedule}" for agent_name "${args.agent_name}".`;
+        if (args.timezone) {
+          try {
+            new R("0 0 * * *", { timezone: args.timezone });
+          } catch (tzError) {
+            return `Error: Invalid timezone "${args.timezone}". Please provide a valid IANA timezone (e.g., "America/Los_Angeles").`;
+          }
+        }
+        await createCronJob(client, args.agent_name, args.name, args.schedule, args.timezone ?? null, args.message, args.enabled ?? true);
+        const tzInfo = args.timezone ? ` (timezone: ${args.timezone})` : "";
+        return `Cron job "${args.name}" created successfully with schedule "${args.schedule}"${tzInfo} for agent_name "${args.agent_name}".`;
       } catch (error45) {
         if (error45.message?.includes("UNIQUE constraint failed")) {
           return `Error: A job with name "${args.name}" already exists for agent_name "${args.agent_name}".`;
@@ -13419,7 +13448,7 @@ var cronPlugin = async (ctx) => {
     }
   });
   const listCronJobsTool = tool3({
-    description: "List all cron jobs for a specific agent_name with status, schedule, last run time, and next scheduled run",
+    description: "List all cron jobs for a specific agent_name with status, schedule, timezone, last run time, and next scheduled run",
     args: {
       agent_name: z.string().describe("Owner identifier to list jobs for")
     },
@@ -13430,10 +13459,12 @@ var cronPlugin = async (ctx) => {
       }
       const jobList = jobs.map((job) => {
         const status = job.enabled ? "\u2713 enabled" : "\u2717 disabled";
-        const lastRun = job.enabled ? "never" : "n/a";
-        const nextRun = job.enabled ? getNextRunTime(job.schedule) || "invalid schedule" : "n/a";
-        return `  - ${job.name}: ${job.schedule} [${status}]
-    last: ${lastRun} \u2192 next: ${nextRun}`;
+        const lastRun = job.last_run ? new Date(job.last_run).toISOString() : "never";
+        const nextRun = job.enabled ? getNextRunTime(job.schedule, job.timezone) || "invalid schedule" : "n/a";
+        const tz = job.timezone ? ` [${job.timezone}]` : "";
+        return `  - ${job.name}: "${job.schedule}"${tz} [${status}]
+    last: ${lastRun}
+    next: ${nextRun}`;
       }).join(`
 `);
       return `Cron jobs for agent_name "${args.agent_name}" (${jobs.length}):
@@ -13486,14 +13517,15 @@ ${jobList}`;
     }
   });
   const startWatchingCronTool = tool3({
-    description: "IMPORTANT: Creating a cron job does NOT automatically start watching! You must explicitly call this tool to start watching. Start the scheduler to monitor and execute cron jobs for a specific agent_name. The scheduler polls every minute and injects messages when jobs fire.",
+    description: "IMPORTANT: Creating a cron job does NOT automatically start watching! You must explicitly call this tool to start watching. Start the scheduler to monitor and execute cron jobs for a specific agent_name using native Croner scheduling (exact timing, timezone support, overlapping protection).",
     args: {
       agent_name: z.string().describe("Owner identifier to watch jobs for")
     },
     async execute(args, toolCtx) {
       const sessionId = toolCtx.sessionID;
-      startCronWatch(client, args.agent_name, sessionId);
-      return `Cron job scheduler started for agent_name "${args.agent_name}". Jobs will be checked every minute and messages will be injected when jobs fire.`;
+      await startCronWatch(client, args.agent_name, sessionId);
+      const jobs = await getEnabledJobs(client, args.agent_name);
+      return `Cron job scheduler started for agent_name "${args.agent_name}" with ${jobs.length} active job(s) using native Croner scheduling. Jobs will execute at exact scheduled times with timezone support and overlapping protection.`;
     }
   });
   const stopWatchingCronTool = tool3({
@@ -13537,7 +13569,9 @@ ${historyList}`;
     async execute(args) {
       const isActive = isCronWatchActive(args.agent_name);
       if (isActive) {
-        return `Cron job scheduler is ACTIVE for agent_name "${args.agent_name}". Jobs are being monitored and will execute on schedule.`;
+        const agentJobs = activeCronJobs.get(args.agent_name);
+        const jobCount = agentJobs?.size || 0;
+        return `Cron job scheduler is ACTIVE for agent_name "${args.agent_name}" with ${jobCount} job(s) running.`;
       } else {
         return `Cron job scheduler is NOT ACTIVE for agent_name "${args.agent_name}". Use start_watching_cron_jobs to begin monitoring jobs.`;
       }

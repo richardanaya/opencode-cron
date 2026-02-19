@@ -1,6 +1,6 @@
 {
   "name": "opencode-cron",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "A cron job scheduler for OpenCode sessions that triggers messages at scheduled intervals",
   "type": "module",
   "main": "./dist/index.js",
