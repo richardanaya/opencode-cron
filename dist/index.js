@@ -13194,13 +13194,13 @@ async function getDatabase(client) {
   }
   return db;
 }
-async function createCronJob(client, agent_name, name, schedule, timezone, message, enabled = true) {
+async function createCronJob(client, agent_name, name, schedule, timezone, message) {
   const database = await getDatabase(client);
   const stmt = database.prepare(`
     INSERT INTO cron_jobs (name, owner, schedule, timezone, message, enabled, created_at, last_run)
     VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
   `);
-  stmt.run(name, agent_name, schedule, timezone, message, enabled ? 1 : 0, Date.now());
+  stmt.run(name, agent_name, schedule, timezone, message, 1, Date.now());
 }
 async function listCronJobs(client, agent_name) {
   const database = await getDatabase(client);
@@ -13317,7 +13317,6 @@ async function startCronWatch(client, agent_name, sessionId) {
       console.error(`[Cron] Failed to create job "${job.name}" for agent_name "${agent_name}":`, error45);
     }
   }
-  console.log(`[Cron] Started native scheduler for agent_name "${agent_name}" with ${agentJobs.size} jobs`);
 }
 function createCronerJob(client, sessionId, job) {
   try {
@@ -13342,11 +13341,9 @@ function stopCronWatch(agent_name) {
   if (agentJobs) {
     for (const [jobName, cronJob] of agentJobs.entries()) {
       cronJob.stop();
-      console.log(`[Cron] Stopped job "${jobName}" for agent_name "${agent_name}"`);
     }
     agentJobs.clear();
     activeCronJobs.delete(agent_name);
-    console.log(`[Cron] Stopped all jobs for agent_name "${agent_name}"`);
   }
 }
 function stopAllCronWatches() {
@@ -13355,7 +13352,6 @@ function stopAllCronWatches() {
       cronJob.stop();
     }
     agentJobs.clear();
-    console.log(`[Cron] Stopped all jobs for agent_name "${agent_name}"`);
   }
   activeCronJobs.clear();
 }
@@ -13365,7 +13361,6 @@ function isCronWatchActive(agent_name) {
 async function executeCronJob(client, sessionId, job) {
   const executedAt = Date.now();
   try {
-    console.log(`[Cron] Executing job "${job.name}" for agent_name "${job.agent_name}" at ${new Date().toISOString()}`);
     await updateLastRun(client, job.agent_name, job.name, executedAt);
     await addHistoryEntry(client, job.name, executedAt, true);
     await injectCronMessage(client, sessionId, job);
@@ -13421,8 +13416,7 @@ var cronPlugin = async (ctx) => {
       name: z.string().describe("Unique job identifier (unique per agent_name)"),
       schedule: z.string().describe("5-element cron expression (e.g., '*/5 * * * *' for every 5 minutes, '0 9 * * 1-5' for weekdays at 9am)"),
       message: z.string().describe("Message to inject when job fires"),
-      timezone: z.string().optional().describe("IANA timezone (e.g., 'America/Los_Angeles', 'America/New_York'). Uses system timezone if not specified."),
-      enabled: z.boolean().optional().describe("Whether job is active (default: true)")
+      timezone: z.string().optional().describe("IANA timezone (e.g., 'America/Los_Angeles', 'America/New_York'). Uses system timezone if not specified.")
     },
     async execute(args) {
       try {
@@ -13436,7 +13430,7 @@ var cronPlugin = async (ctx) => {
             return `Error: Invalid timezone "${args.timezone}". Please provide a valid IANA timezone (e.g., "America/Los_Angeles").`;
           }
         }
-        await createCronJob(client, args.agent_name, args.name, args.schedule, args.timezone ?? null, args.message, args.enabled ?? true);
+        await createCronJob(client, args.agent_name, args.name, args.schedule, args.timezone ?? null, args.message);
         const tzInfo = args.timezone ? ` (timezone: ${args.timezone})` : "";
         return `Cron job "${args.name}" created successfully with schedule "${args.schedule}"${tzInfo} for agent_name "${args.agent_name}".`;
       } catch (error45) {
@@ -13463,6 +13457,7 @@ var cronPlugin = async (ctx) => {
         const nextRun = job.enabled ? getNextRunTime(job.schedule, job.timezone) || "invalid schedule" : "n/a";
         const tz = job.timezone ? ` [${job.timezone}]` : "";
         return `  - ${job.name}: "${job.schedule}"${tz} [${status}]
+    message: ${job.message}
     last: ${lastRun}
     next: ${nextRun}`;
       }).join(`
