@@ -13415,7 +13415,7 @@ var cronPlugin = async (ctx) => {
   const { tool: tool3 } = await Promise.resolve().then(() => (init_dist(), exports_dist));
   const z = tool3.schema;
   const createCronJobTool = tool3({
-    description: "Create a new scheduled cron job with optional timezone support",
+    description: "Create a new scheduled cron job with optional IANA timezone support (e.g., 'America/Los_Angeles'). Uses system timezone if not specified.",
     args: {
       agent_name: z.string().describe("Owner identifier for this job (e.g., user name or session id)"),
       name: z.string().describe("Unique job identifier (unique per agent_name)"),
